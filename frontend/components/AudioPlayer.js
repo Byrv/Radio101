@@ -1,7 +1,7 @@
 'use client';
 import { useState } from 'react';
 
-export default function AudioPlayer({ audioRef, isPlaying, play, pause, isBuffering }) {
+export default function AudioPlayer({ audioRef, isPlaying, play, pause, isBuffering, live }) {
   const [volume, setVolume] = useState(1);
 
   const handleVolumeChange = (e) => {
@@ -28,9 +28,9 @@ export default function AudioPlayer({ audioRef, isPlaying, play, pause, isBuffer
         id="play-pause-btn"
         className="play-btn"
         onClick={togglePlay}
-        disabled={isBuffering}
+        disabled={!live && !isPlaying}
       >
-        {isBuffering ? '⏳' : isPlaying ? '⏸' : '▶'}
+        {!live && !isPlaying ? '⏹' : isBuffering ? '⏳' : isPlaying ? '⏸' : '▶'}
       </button>
 
       <div className="volume-control">

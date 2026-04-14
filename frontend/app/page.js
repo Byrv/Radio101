@@ -70,6 +70,7 @@ export default function ListenerPage() {
           play={play}
           pause={pause}
           isBuffering={isBuffering}
+          live={streamStatus.live}
         />
 
         <Visualizer analyserNode={analyserNode} isPlaying={isPlaying} />

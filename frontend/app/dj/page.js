@@ -14,6 +14,7 @@ export default function DJPage() {
   const streamRef = useRef(null);
   const timerRef = useRef(null);
   const autoDetectIntervalRef = useRef(null);
+  const lastDetectedRef = useRef('');
 
   // Listen for status updates
   useEffect(() => {
@@ -23,7 +24,38 @@ export default function DJPage() {
     return () => socket.off('stream:status', handleStatus);
   }, [socket]);
 
-  // Auto-detect song from MediaSession API
+  // Parse "Artist - Title (Official Video) - YouTube" from a tab title
+  const parseTabTitle = useCallback((label) => {
+    if (!label) return null;
+
+    // Strip known platform suffixes
+    let cleaned = label
+      .replace(/\s*[-–—]\s*(YouTube|Spotify|SoundCloud|Apple Music|Deezer|Tidal|Vimeo)$/i, '')
+      .trim();
+
+    // Strip common video suffixes
+    cleaned = cleaned
+      .replace(/\s*\(?\s*(Official\s*)?(Music\s*)?(Video|Audio|Lyric|Lyrics|Visualizer|MV)\s*\)?\s*$/i, '')
+      .replace(/\s*\[?\s*(Official\s*)?(Music\s*)?(Video|Audio|Lyric|Lyrics|Visualizer|MV)\s*\]?\s*$/i, '')
+      .trim();
+
+    // Split on " - " or " – " to get artist and title
+    const separators = [' - ', ' – ', ' — ', ' | '];
+    for (const sep of separators) {
+      const idx = cleaned.indexOf(sep);
+      if (idx > 0) {
+        return {
+          artist: cleaned.slice(0, idx).trim(),
+          title: cleaned.slice(idx + sep.length).trim(),
+        };
+      }
+    }
+
+    // No separator found — use the whole string as title
+    return { artist: '', title: cleaned };
+  }, []);
+
+  // Auto-detect: poll MediaSession as fallback (works for some PWAs/apps)
   useEffect(() => {
     if (!autoDetect || !isBroadcasting) {
       clearInterval(autoDetectIntervalRef.current);
@@ -35,7 +67,9 @@ export default function DJPage() {
         const meta = navigator.mediaSession.metadata;
         const newTitle = meta.title || '';
         const newArtist = meta.artist || '';
-        if (newTitle !== nowPlaying.title || newArtist !== nowPlaying.artist) {
+        const key = `${newArtist}|${newTitle}`;
+        if (key !== lastDetectedRef.current && (newTitle || newArtist)) {
+          lastDetectedRef.current = key;
           const updated = { title: newTitle, artist: newArtist };
           setNowPlaying(updated);
           socket?.emit('dj:now-playing', updated);
@@ -44,7 +78,7 @@ export default function DJPage() {
     }, 5000);
 
     return () => clearInterval(autoDetectIntervalRef.current);
-  }, [autoDetect, isBroadcasting, socket, nowPlaying.title, nowPlaying.artist]);
+  }, [autoDetect, isBroadcasting, socket]);
 
   // Broadcast duration timer
   useEffect(() => {
@@ -63,16 +97,38 @@ export default function DJPage() {
     if (!socket || !isConnected) return;
 
     try {
-      // Capture Chrome tab audio
-      const stream = await navigator.mediaDevices.getDisplayMedia({
+      // Capture Chrome tab audio (video must be requested; we discard it)
+      const displayStream = await navigator.mediaDevices.getDisplayMedia({
         audio: true,
-        video: false,
+        video: true,
       });
+
+      // Read tab title from video track label before discarding video
+      const videoTrack = displayStream.getVideoTracks()[0];
+      const tabTitle = videoTrack?.label || '';
+      displayStream.getVideoTracks().forEach((track) => track.stop());
+
+      // Build an audio-only stream
+      const audioTracks = displayStream.getAudioTracks();
+      if (audioTracks.length === 0) {
+        throw new Error('No audio track — make sure you check "Share audio" in the dialog');
+      }
+      const stream = new MediaStream(audioTracks);
       streamRef.current = stream;
 
       // Authenticate as DJ
       const djSecret = process.env.NEXT_PUBLIC_DJ_SECRET;
       socket.emit('dj:start', { djSecret });
+
+      // Auto-detect song from tab title
+      if (autoDetect && tabTitle) {
+        const parsed = parseTabTitle(tabTitle);
+        if (parsed && (parsed.title || parsed.artist)) {
+          setNowPlaying(parsed);
+          lastDetectedRef.current = `${parsed.artist}|${parsed.title}`;
+          socket.emit('dj:now-playing', parsed);
+        }
+      }
 
       // Create MediaRecorder
       const mediaRecorder = new MediaRecorder(stream, {
@@ -98,14 +154,14 @@ export default function DJPage() {
       setIsBroadcasting(true);
 
       // Handle stream ending (user clicks "Stop sharing" in browser UI)
-      stream.getTracks().forEach((track) => {
+      audioTracks.forEach((track) => {
         track.onended = () => stopBroadcast();
       });
     } catch (err) {
       console.error('Failed to start broadcast:', err);
       alert('Failed to start broadcasting. Make sure you select a tab with audio.');
     }
-  }, [socket, isConnected]);
+  }, [socket, isConnected, autoDetect, parseTabTitle]);
 
   const stopBroadcast = useCallback(() => {
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {

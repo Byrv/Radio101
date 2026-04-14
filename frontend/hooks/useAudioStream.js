@@ -10,35 +10,58 @@ export function useAudioStream(socket) {
   const audioContextRef = useRef(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isBuffering, setIsBuffering] = useState(true);
+  const hasDataRef = useRef(false);
+  const pendingPlayRef = useRef(false);
 
   // Initialize MediaSource
   useEffect(() => {
     if (!socket || !audioRef.current) return;
 
+    let aborted = false;
+    hasDataRef.current = false;
+    setIsBuffering(true);
     const audio = audioRef.current;
     const mediaSource = new MediaSource();
     mediaSourceRef.current = mediaSource;
-    audio.src = URL.createObjectURL(mediaSource);
+
+    const objectUrl = URL.createObjectURL(mediaSource);
+    audio.src = objectUrl;
 
     mediaSource.addEventListener('sourceopen', () => {
+      if (aborted || mediaSource.readyState !== 'open') return;
+
       try {
         const sourceBuffer = mediaSource.addSourceBuffer('audio/webm;codecs=opus');
         sourceBufferRef.current = sourceBuffer;
 
         sourceBuffer.addEventListener('updateend', () => {
+          if (aborted || mediaSource.readyState !== 'open') return;
+
+          // Mark that we have data after first successful append
+          if (!hasDataRef.current && sourceBuffer.buffered.length > 0) {
+            hasDataRef.current = true;
+            setIsBuffering(false);
+
+            // If play was requested while buffering, start now
+            if (pendingPlayRef.current) {
+              pendingPlayRef.current = false;
+              audio.play().then(() => setIsPlaying(true)).catch(() => {});
+            }
+          }
+
           // Process queue
           if (queueRef.current.length > 0 && !sourceBuffer.updating) {
             const next = queueRef.current.shift();
             try {
               sourceBuffer.appendBuffer(next);
             } catch (e) {
-              console.error('Error appending queued buffer:', e);
+              // SourceBuffer may have been removed
             }
           }
 
           // Auto-cleanup: remove buffered data older than 30s
           try {
-            if (sourceBuffer.buffered.length > 0) {
+            if (!sourceBuffer.updating && sourceBuffer.buffered.length > 0) {
               const currentTime = audio.currentTime;
               const start = sourceBuffer.buffered.start(0);
               if (currentTime - start > 30) {
@@ -49,8 +72,6 @@ export function useAudioStream(socket) {
             // Ignore cleanup errors
           }
         });
-
-        setIsBuffering(false);
       } catch (e) {
         console.error('Failed to create SourceBuffer:', e);
       }
@@ -58,17 +79,20 @@ export function useAudioStream(socket) {
 
     // Listen for audio chunks
     const handleChunk = (chunk) => {
+      if (aborted) return;
+
       const buffer = chunk instanceof ArrayBuffer
         ? chunk
         : chunk.buffer || new Uint8Array(chunk).buffer;
 
-      if (sourceBufferRef.current && !sourceBufferRef.current.updating) {
+      const sb = sourceBufferRef.current;
+      if (sb && !sb.updating && mediaSourceRef.current?.readyState === 'open') {
         try {
-          sourceBufferRef.current.appendBuffer(buffer);
+          sb.appendBuffer(buffer);
         } catch (e) {
-          console.error('Error appending buffer:', e);
+          // SourceBuffer removed or MediaSource closed
         }
-      } else {
+      } else if (!aborted) {
         queueRef.current.push(buffer);
         // Limit queue size to prevent memory bloat
         if (queueRef.current.length > 50) {
@@ -80,11 +104,16 @@ export function useAudioStream(socket) {
     socket.on('stream:audio-chunk', handleChunk);
 
     return () => {
+      aborted = true;
       socket.off('stream:audio-chunk', handleChunk);
+      sourceBufferRef.current = null;
+      queueRef.current = [];
+      hasDataRef.current = false;
+      pendingPlayRef.current = false;
       if (mediaSource.readyState === 'open') {
         try { mediaSource.endOfStream(); } catch (e) { /* ignore */ }
       }
-      URL.revokeObjectURL(audio.src);
+      URL.revokeObjectURL(objectUrl);
     };
   }, [socket]);
 
@@ -108,6 +137,12 @@ export function useAudioStream(socket) {
 
   const play = useCallback(async () => {
     if (!audioRef.current) return;
+    if (!hasDataRef.current) {
+      // No audio data yet — defer play until first chunk arrives
+      pendingPlayRef.current = true;
+      setIsBuffering(true);
+      return;
+    }
     try {
       await audioRef.current.play();
       setIsPlaying(true);

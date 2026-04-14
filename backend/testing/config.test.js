@@ -19,7 +19,7 @@ describe('config', () => {
   test('reads PORT from environment', () => {
     process.env.PORT = '4000';
     const config = require('../src/config');
-    expect(config.port).toBe('4000');
+    expect(config.port).toBe(4000);
   });
 
   test('reads FRONTEND_ORIGIN from environment', () => {
